@@ -400,7 +400,7 @@ class LammpsSimulation(object):
                 sg.molecule_id = molid
                 # unwrap coordinates
                 sg.unwrap_node_coordinates(self.cell)
-                file2store = "sg"+str(molid)+'.bz2'
+                file2store = "sg"+str(molid)
                 self.subgraphs.append(file2store)
                 nx.write_gpickle(sg, file2store)
         type = 0
