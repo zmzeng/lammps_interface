@@ -2,6 +2,8 @@
 """
 Lammps interface main program. Lammps simulations are setup here.
 """
+from memory_profiler import profile
+import pickle
 import os
 import sys
 import math
@@ -67,7 +69,7 @@ class LammpsSimulation(object):
                 nds = []
                 for m in self.molecule_types[k]:
 
-                    jnodes = sorted(self.subgraphs[m].nodes())
+                    jnodes = sorted(nx.read_gpickle(self.subgraphs[m]).nodes())
                     nds += jnodes
 
                     for n in jnodes:
@@ -385,6 +387,7 @@ class LammpsSimulation(object):
             # no graph set yet
             pass
 
+    @profile
     def split_graph(self):
 
         self.compute_molecules()
@@ -397,19 +400,21 @@ class LammpsSimulation(object):
                 sg.molecule_id = molid
                 # unwrap coordinates
                 sg.unwrap_node_coordinates(self.cell)
-                self.subgraphs.append(sg)
+                file2store = "sg"+str(molid)+'.bz2'
+                self.subgraphs.append(file2store)
+                nx.write_gpickle(sg, file2store)
         type = 0
         temp_types = {}
         for i, j in itertools.combinations(range(len(self.subgraphs)), 2):
-            if self.subgraphs[i].number_of_nodes() != self.subgraphs[j].number_of_nodes():
+            if nx.read_gpickle(self.subgraphs[i]).number_of_nodes() != nx.read_gpickle(self.subgraphs[j]).number_of_nodes():
                 continue
 
             #TODO(pboyd): For complex 'floppy' molecules, a rigid 3D clique detection
             # algorithm won't work very well. Inchi or smiles comparison may be better,
             # but that would require using openbabel. I'm trying to keep this
             # code as independent of non-standard python libraries as possible.
-            matched = self.subgraphs[i] | self.subgraphs[j]
-            if (len(matched) == self.subgraphs[i].number_of_nodes()):
+            matched = nx.read_gpickle(self.subgraphs[i]) | nx.read_gpickle(self.subgraphs[j])
+            if (len(matched) == nx.read_gpickle(self.subgraphs[i]).number_of_nodes()):
                 if i not in list(temp_types.keys()) and j not in list(temp_types.keys()):
                     type += 1
                     temp_types[i] = type
@@ -443,7 +448,7 @@ class LammpsSimulation(object):
         # apply different force fields.
         for mtype in list(self.molecule_types.keys()):
             # prompt for ForceField?
-            rep = self.subgraphs[self.molecule_types[mtype][0]]
+            rep = nx.read_gpickle(self.subgraphs[self.molecule_types[mtype][0]])
             #response = input("Would you like to apply a new force field to molecule type %i with atoms (%s)? [y/n]: "%
             #        (mtype, ", ".join([rep.node[j]['element'] for j in rep.nodes()])))
             #ff = self.options.force_field
@@ -474,7 +479,7 @@ class LammpsSimulation(object):
             for m in self.molecule_types[mtype]:
                 # Water check
                 # currently only works if the cif file contains water particles without dummy atoms.
-                ngraph = self.subgraphs[m]
+                ngraph = nx.read_gpickle(self.subgraphs[m])
                 self.assign_molecule_ids(ngraph)
                 mff = ff
                 if ff[-5:] == "Water":
@@ -482,7 +487,7 @@ class LammpsSimulation(object):
                     mff = mff[:-6] # remove _Water from end of name
                 if ff[-3:] == "CO2":
                     self.add_co2_model(ngraph, ff)
-                p = getattr(ForceFields, mff)(graph=self.subgraphs[m],
+                p = getattr(ForceFields, mff)(graph=nx.read_gpickle(self.subgraphs[m]),
                                          cutoff=self.options.cutoff,
                                          h_bonding=h_bonding)
                 self.special_commands += p.special_commands()
@@ -673,7 +678,7 @@ class LammpsSimulation(object):
         self.graph.original_size += inc
         for mtype in list(self.molecule_types.keys()):
             for m in self.molecule_types[mtype]:
-                graph = self.subgraphs[m]
+                graph = nx.read_gpickle(self.subgraphs[m])
                 graph.original_size += 1
 
     def compute_simulation_size(self):
@@ -708,21 +713,23 @@ class LammpsSimulation(object):
             self.graph.build_supercell(supercell, self.cell)
             molcount = 0
             if self.subgraphs:
-                molcount = max([g.molecule_id for g in self.subgraphs])
+                molcount = max([nx.read_gpickle(g).molecule_id for g in self.subgraphs])
 
             for mtype in list(self.molecule_types.keys()):
                 # prompt for replication of this molecule in the supercell.
-                rep = self.subgraphs[self.molecule_types[mtype][0]]
+                rep = nx.read_gpickle(self.subgraphs[self.molecule_types[mtype][0]])
                 response = input("Would you like to replicate molceule %i with atoms (%s) in the supercell? [y/n]: "%
                         (mtype, ", ".join([rep.node[j]['element'] for j in rep.nodes()])))
                 if response in ['y', 'Y', 'yes']:
+                    sg = nx.read_gpickle(self.subgraphs[m])
                     for m in self.molecule_types[mtype]:
-                        self.subgraphs[m].build_supercell(supercell, self.cell, track_molecule=True, molecule_len=molcount)
+                        sg.build_supercell(supercell, self.cell, track_molecule=True, molecule_len=molcount)
+                    nx.write_gpickle(sg, self.subgraphs[m])
             self.cell.update_supercell(supercell)
 
     def merge_graphs(self):
         for mgraph in self.subgraphs:
-            self.graph += mgraph
+            self.graph += nx.read_gpickle(mgraph)
         for node in self.graph.nodes():
             data=self.graph.node[node]
         if sorted(self.graph.nodes()) != [i+1 for i in range(len(self.graph.nodes()))]:
@@ -730,7 +737,9 @@ class LammpsSimulation(object):
             reorder_dic = {i:j+1 for (i, j) in zip(sorted(self.graph.nodes()), range(len(self.graph.nodes())))}
             self.graph.reorder_labels(reorder_dic)
             for mgraph in self.subgraphs:
-                mgraph.reorder_labels(reorder_dic)
+                sg = nx.read_gpickle(mgraph)
+                sg.reorder_labels(reorder_dic)
+                nx.write_gpickle(sg, mgraph)
 
     def write_lammps_files(self, wd=None):
         self.unique_atoms(self.graph)
@@ -1282,7 +1291,7 @@ class LammpsSimulation(object):
                 inp_str += "%-15s %-8s %s  "%("group", "%i"%(mtype), "id")
                 all_atoms = []
                 for j in self.molecule_types[mtype]:
-                    all_atoms += self.subgraphs[j].nodes()
+                    all_atoms += nx.read_gpickle(self.subgraphs[j]).nodes()
                 for x in self.groups(all_atoms):
                     x = list(x)
                     if(len(x)>1):
@@ -1295,8 +1304,9 @@ class LammpsSimulation(object):
                 mcount = 0
                 if list_individual_molecules:
                     for j in self.molecule_types[mtype]:
-                        if (self.subgraphs[j].molecule_images):
-                            for molecule in self.subgraphs[j].molecule_images:
+                        sg = nx.read_gpickle(self.subgraphs[j])
+                        if (sg.molecule_images):
+                            for molecule in sg.molecule_images:
                                 mcount += 1
                                 inp_str += "%-15s %-8s %s  "%("group", "%i-%i"%(mtype, mcount), "id")
                                 for x in self.groups(molecule):
@@ -1309,7 +1319,7 @@ class LammpsSimulation(object):
                         elif len(self.molecule_types[mtype]) > 1:
                             mcount += 1
                             inp_str += "%-15s %-8s %s  "%("group", "%i-%i"%(mtype, mcount), "id")
-                            molecule = self.subgraphs[j].nodes()
+                            molecule = sg.nodes()
                             for x in self.groups(molecule):
                                 x = list(x)
                                 if(len(x)>1):
@@ -1404,7 +1414,7 @@ class LammpsSimulation(object):
             inp_str += "%-15s %s %s.molecule\n"%("molecule", self.options.insert_molecule, self.options.insert_molecule)
 
         for mol in sorted(self.molecule_types.keys()):
-            rep = self.subgraphs[self.molecule_types[mol][0]]
+            rep = nx.read_gpickle(self.subgraphs[self.molecule_types[mol][0]])
             if rep.rigid:
                 inp_str += "%-15s %s\n"%("neigh_modify", "exclude molecule %i"%(mol))
                 # find and delete all bonds, angles, dihedrals, and impropers associated
@@ -1458,7 +1468,7 @@ class LammpsSimulation(object):
             for molid in mollist:
                 id = self.fixcount()
                 molecule_fixes.append(id)
-                rep = self.subgraphs[self.molecule_types[molid][0]]
+                rep = nx.read_gpickle(self.subgraphs[self.molecule_types[molid][0]])
                 if(rep.rigid):
                     inp_str += "%-15s %s\n"%("fix", "%i %s rigid/small molecule langevin %.2f %.2f ${tdamp} %i"%(id,
                                                                                             str(molid),
@@ -1545,7 +1555,7 @@ class LammpsSimulation(object):
             for molid in mollist:
                 id = self.fixcount()
                 molecule_fixes.append(id)
-                rep = self.subgraphs[self.molecule_types[molid][0]]
+                rep = nx.read_gpickle(self.subgraphs[self.molecule_types[molid][0]])
                 if(rep.rigid):
                     inp_str += "%-15s %s\n"%("fix", "%i %s rigid/nvt/small molecule temp %.2f %.2f ${tdamp}"%(id,
                                                                                             str(molid),
@@ -1694,7 +1704,7 @@ class LammpsSimulation(object):
             for molid in mollist:
                 id = self.fixcount()
                 molecule_fixes.append(id)
-                rep = self.subgraphs[self.molecule_types[molid][0]]
+                rep = nx.read_gpickle(self.subgraphs[self.molecule_types[molid][0]])
                 if(rep.rigid):
                     inp_str += "%-15s %s\n"%("fix", "%i %s rigid/small molecule langevin ${sim_temp} ${sim_temp} ${tdamp} %i"%(id,
                                                                                             str(molid),
@@ -1793,6 +1803,7 @@ class LammpsSimulation(object):
             yield list(map(operator.itemgetter(1), g))
 
     # this needs to be somewhere else.
+    @profile
     def compute_molecules(self, size_cutoff=0.5):
         """Ascertain if there are molecules within the porous structure"""
         for j in nx.connected_components(self.graph):
@@ -1801,6 +1812,7 @@ class LammpsSimulation(object):
             if((len(j) <= self.graph.original_size*size_cutoff) or (len(j) < 25)) and (not len(j) > 100) :
                 self.molecules.append(j)
 
+    @profile
     def cut_molecule(self, nodes):
         mgraph = self.graph.subgraph(nodes)
         self.graph.remove_nodes_from(nodes)
